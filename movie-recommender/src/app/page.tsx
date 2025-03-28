@@ -1,5 +1,4 @@
 "use client";
-
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { motion, AnimatePresence } from "framer-motion";
@@ -54,6 +53,11 @@ function encodeAnswers(answers) {
 
   answers.forEach((entry, i) => {
     const options = answerMap[i];
+    if (!options) {
+      console.warn(`Missing encoding options for question index ${i}`);
+      return;
+    }
+
     const oneHot = options.map((opt) => (opt === entry.answer ? 1 : 0));
     vector.push(...oneHot);
   });
@@ -67,8 +71,48 @@ export default function MovieRecommendationApp() {
   const [answers, setAnswers] = useState([]);
   const [startTime, setStartTime] = useState(Date.now());
   const [done, setDone] = useState(false);
+  const [userId, setUserId] = useState("");
+  const [userHistory, setUserHistory] = useState([]);
+  const [stats, setStats] = useState({ feedback_count: 0, user_count: 0 });
   const [result, setResult] = useState([]);
   const [hasMounted, setHasMounted] = useState(false);
+  const [userVector, setUserVector] = useState([]);
+  const [movieTitles, setMovieTitles] = useState({});
+
+  useEffect(() => {
+    fetch("http://localhost:8000/movie_titles")
+      .then(res => res.json())
+      .then(data => setMovieTitles(data.titles || {}))
+      .catch(err => console.error("Failed to fetch movie titles:", err));
+  }, []);
+
+
+  useEffect(() => {
+    let existing = localStorage.getItem("user_id");
+    if (!existing) {
+      existing = "user_" + Date.now();
+      localStorage.setItem("user_id", existing);
+    }
+    setUserId(existing);
+  }, []);
+
+  useEffect(() => {
+    if (userId) {
+      fetch(`http://localhost:8000/history/${userId}`)
+        .then(res => res.json())
+        .then(data => setUserHistory(data.liked_movies || []))
+        .catch(err => console.error("Failed to fetch history:", err));
+    }
+  }, [userId]);
+
+  useEffect(() => {
+    fetch("http://localhost:8000/stats")
+      .then(res => res.json())
+      .then(data => setStats(data))
+      .catch(err => console.error("Failed to fetch stats:", err));
+  }, []);
+
+
   useEffect(() => {
     setHasMounted(true);
   }, []);
@@ -129,13 +173,20 @@ export default function MovieRecommendationApp() {
     } else {
       setDone(true);
       const userVector = encodeAnswers(newAnswers);
+      const userId = "user_" + Date.now(); // Or store in state if needed
+
       try {
         const response = await fetch("http://localhost:8000/recommend", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ vector: userVector })
+          body: JSON.stringify({
+            user_id: userId,
+            vector: userVector
+          })
         });
         const data = await response.json();
+        setUserId(userId);         // Store for feedback
+        setUserVector(userVector); // Store for feedback
         setResult(data.recommendations);
       } catch (err) {
         console.error("Recommendation fetch failed:", err);
@@ -144,26 +195,89 @@ export default function MovieRecommendationApp() {
       // setResult(recommendations[index]);
     }
   };
+  const sendFeedback = async (movie, liked) => {
+    const response = await fetch("http://localhost:8000/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: userId,
+        user_vector: userVector,
+        movie_id: movie.movie_id,
+        movie_vector: movie.movie_vector,
+        liked: liked
+      })
+    });
+
+    const data = await response.json();
+    console.log("✅ Feedback sent:", data);
+  };
+
   if (!genreSchema || !hasMounted || genreSchema.length === 0) {
     return <div>Loading...</div>;
   }
 
-  if (done) {
-    return (
-      <div className="p-6 min-h-screen flex flex-col items-center justify-center bg-black text-white">
-        <h2 className="text-2xl font-bold italic mb-4">Your Recommendations:</h2>
-        <ul className="list-disc list-inside text-lg">
-          {result.map((movie, index) => (
-            <li key={index}>
-              {movie.title} — <span className="text-sm italic text-gray-400">score: {movie.score}</span>
-            </li>
-          ))}
-        </ul>
-      </div>
-    );
-  }
-
   const currentQuestion = questions[current];
+
+  return (
+    <div className="relative min-h-screen w-screen bg-black text-white overflow-hidden flex flex-col items-center justify-center">
+      {done ? (
+        <div className="p-6 w-full flex flex-col items-center justify-center">
+          <h2 className="text-2xl font-bold italic mb-4">Your Recommendations:</h2>
+          <ul className="space-y-4 text-lg">
+            {result.map((movie, index) => (
+              <li key={index} className="flex items-center justify-between gap-4">
+                <div>
+                  {movie.title}
+                  <span className="text-sm italic text-gray-400 ml-2">score: {movie.score}</span>
+                </div>
+                <div className="flex gap-2">
+                  <Button onClick={() => sendFeedback(movie, 1)}>👍</Button>
+                  <Button onClick={() => sendFeedback(movie, 0)}>👎</Button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={current}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            transition={{ duration: 0.3 }}
+          >
+            <div className="text-center p-4">
+              <h2 className="text-4xl italic font-semibold mb-6 max-w-3xl">
+                {currentQuestion.text}
+              </h2>
+              <div className="flex flex-wrap justify-center gap-4">
+                {currentQuestion.options.map((option, idx) => (
+                  <Button key={idx} onClick={() => handleAnswer(option)}>{option}</Button>
+                ))}
+              </div>
+            </div>
+          </motion.div>
+        </AnimatePresence>
+      )}
+
+      {/* 🚀 Always-visible dashboard */}
+      <div className="absolute bottom-0 left-0 right-0 p-6 bg-black text-white border-t border-gray-800">
+        <div className="mt-8">
+          <h3 className="text-xl font-bold mb-2">Movies You've Liked</h3>
+          {userHistory.length === 0 ? (
+            <p className="text-sm text-gray-400 italic">No liked movies yet.</p>
+          ) : (
+            <ul className="list-disc pl-5 text-sm">
+              {userHistory.map((m, i) => (
+                <li key={i}>{movieTitles[m.movie_id] || `Movie ID: ${m.movie_id}`}</li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 
   return (
     <div
@@ -196,6 +310,22 @@ export default function MovieRecommendationApp() {
           </div>
         </motion.div>
       </AnimatePresence>
+      <div className="absolute bottom-0 left-0 right-0 p-6 bg-black text-white border-t border-gray-800">
+        <div className="max-w-4xl mx-auto">
+          <h3 className="text-xl font-bold mb-2">Movies You've Liked</h3>
+          <ul className="list-disc pl-5 text-sm">
+            {userHistory.map((m, i) => (
+              <li key={i}>Movie ID: {m.movie_id}</li>
+            ))}
+          </ul>
+
+          <div className="mt-6 border-t border-gray-700 pt-4">
+            <h3 className="text-xl font-bold mb-2">System Stats</h3>
+            <p>Feedback entries: {stats.feedback_count}</p>
+            <p>Unique users: {stats.user_count}</p>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
